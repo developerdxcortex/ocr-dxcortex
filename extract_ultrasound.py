@@ -436,6 +436,17 @@ def parse_measurement_line(line):
         flags=re.IGNORECASE,
     )
 
+    # OCR fix: Tesseract reads the digit "4" merged with the preceding decimal
+    # point "." as the LETTER "A" when the OCR is on small blurry text. The
+    # ".4" glyph (small dot + 4 with crossbar) visually resembles capital "A":
+    #   "1 D9A5cm"   ← actually "1 D 9.45cm"  (the ".4" became "A")
+    #   "1 D3A6cm"   ← actually "1 D 3.46cm"  (the ".4" became "A")
+    # Pattern: digit + "A" + digit, with "A" sitting inside what looks like a
+    # number. No legitimate clinical label has this pattern (real labels with
+    # "A" never sit between two digits with no spaces).
+    # Replace "A" between digits with ".4" to recover the original value.
+    line = re.sub(r"(\d)A(\d)", r"\1.4\2", line)
+
     # Find a number (optionally negative/decimal) followed optionally by a unit,
     # at or near the END of the line.  Allow a stray "/" between number and unit
     # (Tesseract sometimes inserts one).
