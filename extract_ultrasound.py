@@ -750,16 +750,23 @@ def extract_measurements(img):
             new_str = str(entry["value"])
             if "7" not in new_str or "7" in existing_str:
                 continue
-            # Magnitudes must be similar (within 5x) to ensure we're
-            # correcting a digit-misread, not a totally different reading.
+            # Magnitudes must be similar to ensure we're correcting a
+            # digit-misread, not a totally different reading. The "7
+            # must be present" check above is the main safety filter;
+            # this ratio check just rejects egregiously different values.
+            # Use 10x to allow common digit-confusion patterns:
+            #   "1" vs "7" alone = 7x
+            #   "15" vs "75" = 5x exactly
+            #   "1.07" vs "7.07" = 6.6x
             try:
                 ratio = max(abs(entry["value"]), abs(existing["value"])) / max(
                     min(abs(entry["value"]), abs(existing["value"])), 0.001
                 )
             except (TypeError, ZeroDivisionError):
                 ratio = float("inf")
-            if ratio < 5.0:
+            if ratio <= 10.0:
                 results[slot_to_idx[slot]] = entry
+
 
     # PASS 4 — last-resort fallback if we found nothing at all
     if not results:
