@@ -114,11 +114,16 @@ NORMAL_CROPS = [
     (0.83, 0.78, 1.00, 1.00),   # medium — tall fetal biometry boxes (AC/EFW/HC etc.)
     (0.78, 0.65, 1.00, 1.00),   # wide — Doppler panels with long labels
 ]
-# Fallback crops — only used when normal OCR finds NOTHING.  The very
-# tight crop + inverted colors handles small white-on-dark single-line
-# boxes (rukaina3 SPLEEN D 6.73cm, rukaina5 LIVER D 11.33cm).
+# Fallback crops — only used when normal OCR finds NOTHING.
+# Kept short to avoid runaway latency on images that simply have no
+# measurement panel (e.g. fetal scan with only the yellow organ label).
+#   - First crop: very-tight + inverted (handles white-on-dark single-line
+#     boxes: rukaina3 SPLEEN D 6.73cm, rukaina5 LIVER D 11.33cm).
+#   - Second crop: wider — catches measurement boxes that sit slightly
+#     left of the tight 0.81 boundary (some machine layouts).
 INVERTED_FALLBACK_CROPS = [
     (0.85, 0.93, 1.00, 1.00),
+    (0.70, 0.85, 1.00, 1.00),
 ]
 
 UNITS_LIST = ["cm/s", "mm/s", "cm", "mm", "bpm", "kg", "ml", "%", "g", "s"]
@@ -398,16 +403,35 @@ def parse_measurement_line(line):
     if not line:
         return None
 
-    # OCR fix: "1 D 0.59cm" sometimes becomes "1 DO. 59cm" or "1 D0. 59cm"
-    # — Tesseract glues the "0" of the decimal "0.59" onto the "D" label,
-    # then splits at the period. Patch this back to "1 D 0.59cm" before
-    # parsing so it gets the correct label and decimal value.
-    # Pattern: leading-index? + D + 'O'/'0' + (period and/or space)+ + 1-2 digits + cm/mm
-    # Anchored at end so we don't break on labels that legitimately contain "DO"
-    # in the middle (e.g. "DOPPLER" — though we don't currently see those).
+    # OCR fix: "1 D 0.59cm" sometimes becomes corrupted variants like:
+    #   "1 DO. 59cm"   — period/space splits decimal
+    #   "1 D0. 59cm"   — zero attached to D
+    #   "1 D O 55cm"   — space between D and O
+    #   "1 DO 55.0cm"  — Tesseract reads "0.55" as "55.0" (digits + bogus .0)
+    #   "1 D055cm"     — fully merged
+    #   "1 DO55cm"     — fully merged with O
+    # In all cases the real label is "D" and the real value is "0.NN".
+    # Patch this back to "1 D 0.NN cm" before parsing so the parser gets
+    # the correct label and decimal value.
     line = re.sub(
-        r"^(\s*\d?\s*)D[O0][.\s]+(\d{1,2})(\s*(?:cm|mm))\s*$",
+        # leading-index? + D + (separator)* + (O|0) + (separator)* +
+        # 1-3 digits + optional ".0" + cm/mm
+        r"^(\s*\d?\s*)D[\s.]*[O0][\s.]*(\d{1,3})(?:\.0)?\s*(cm|mm)\s*$",
         r"\1D 0.\2\3",
+        line,
+        flags=re.IGNORECASE,
+    )
+
+    # OCR fix: Tesseract sometimes reads "9.40cm" as "9 40cm" — splits the
+    # decimal at the "." into a space. The number is plausible (9 < 50 for
+    # length) so our existing decimal-recovery logic doesn't trigger. We
+    # patch this BEFORE the trailing-number match so parsing sees "9.40cm".
+    # Match: <single digit> <space(s)> <2 digits> <space(s)>? cm/mm
+    # Don't apply if the leading number is multi-digit (could be legit "12 40cm" → 12.40cm? rare).
+    # Only fires on N-NN where N is 1-9, NN is 01-99 (typical biometry range).
+    line = re.sub(
+        r"\b(\d)\s+(\d{2})\s*(cm|mm)\b",
+        r"\1.\2\3",
         line,
         flags=re.IGNORECASE,
     )
