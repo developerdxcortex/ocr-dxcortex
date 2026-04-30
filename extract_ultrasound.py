@@ -174,7 +174,25 @@ def fuzzy_match_organ(text):
             if keyword in cand:
                 if len(organ_options) == 1:
                     return organ_options[0], 1.0
-                # Disambiguate (e.g. "RIGHT KIDNEY" vs "LEFT KIDNEY")
+                # Disambiguate (e.g. "RIGHT KIDNEY" vs "LEFT KIDNEY").
+                # Direction-keyword preference: if the candidate contains
+                # "RIGHT" anywhere (including word-reversed forms like
+                # "KIDNEY RIGHT"), pick the RIGHT option. Same for LEFT.
+                # SequenceMatcher alone is unreliable for word-reversed
+                # text — "KIDNEY RIGHT" actually scores higher against
+                # "LEFT KIDNEY" than "RIGHT KIDNEY" because of how it
+                # measures matching subsequences.
+                has_right = "RIGHT" in cand or " RT " in (" " + cand + " ") or cand.startswith("RT ")
+                has_left  = "LEFT"  in cand or " LT " in (" " + cand + " ") or cand.startswith("LT ")
+                if has_right and not has_left:
+                    for opt in organ_options:
+                        if opt.startswith("RIGHT") or opt.startswith("RT "):
+                            return opt, 1.0
+                if has_left and not has_right:
+                    for opt in organ_options:
+                        if opt.startswith("LEFT") or opt.startswith("LT "):
+                            return opt, 1.0
+                # No clear direction keyword — fall back to fuzzy ranking.
                 best = max(
                     organ_options,
                     key=lambda o: SequenceMatcher(None, o, cand).ratio()
@@ -380,6 +398,20 @@ def parse_measurement_line(line):
     if not line:
         return None
 
+    # OCR fix: "1 D 0.59cm" sometimes becomes "1 DO. 59cm" or "1 D0. 59cm"
+    # — Tesseract glues the "0" of the decimal "0.59" onto the "D" label,
+    # then splits at the period. Patch this back to "1 D 0.59cm" before
+    # parsing so it gets the correct label and decimal value.
+    # Pattern: leading-index? + D + 'O'/'0' + (period and/or space)+ + 1-2 digits + cm/mm
+    # Anchored at end so we don't break on labels that legitimately contain "DO"
+    # in the middle (e.g. "DOPPLER" — though we don't currently see those).
+    line = re.sub(
+        r"^(\s*\d?\s*)D[O0][.\s]+(\d{1,2})(\s*(?:cm|mm))\s*$",
+        r"\1D 0.\2\3",
+        line,
+        flags=re.IGNORECASE,
+    )
+
     # Find a number (optionally negative/decimal) followed optionally by a unit,
     # at or near the END of the line.  Allow a stray "/" between number and unit
     # (Tesseract sometimes inserts one).
@@ -416,20 +448,31 @@ def parse_measurement_line(line):
     # Reject when the "label" ends with what looks like a partial number —
     # this happens when OCR fragments one value (e.g. "5.57") into "5.5/" + "7",
     # and our parser would mistakenly treat "D 5.5/" as a label and "7" as the value.
-    if re.search(r"\d\s*[./]?\s*$", label_text):
+    # EXCEPTION: legitimate volume-axis labels D1/D2/D3/D4 end with a digit but
+    # are not partial numbers — they're actual measurement labels.
+    if label_text.upper() not in {"D1", "D2", "D3", "D4"} and re.search(r"\d\s*[./]?\s*$", label_text):
         return None
 
     # Reject labels with garbage letter-then-digit tokens like "WOw2d" or "2ZUW25G".
     # Legitimate digit-bearing tokens (like "20w3d" in "GA 20w3d") always start
     # with a digit, not a letter.
+    # EXCEPTION: short volume-axis labels D1/D2/D3/D4 (and case variants) are
+    # legitimate — they appear in 3-axis volume measurements
+    # ("1 D1 2.92cm, 2 D2 3.08cm, 3 D3 3.69cm, Vol 17.376cm³").
+    VOLUME_AXIS_TOKENS = {"D1", "D2", "D3", "D4"}
     for token in label_text.split():
-        if token and token[0].isalpha() and any(c.isdigit() for c in token):
+        if not token:
+            continue
+        if token.upper() in VOLUME_AXIS_TOKENS:
+            continue  # legitimate volume-axis label
+        if token[0].isalpha() and any(c.isdigit() for c in token):
             return None
 
     # Reject labels with non-clinical characters (punctuation, symbols).
     # Real labels only contain letters, digits, spaces, hyphens, slashes,
-    # underscores, and periods (e.g. "Rt Ut-S/D", "GA 20w3d", "FL/AC").
-    if re.search(r"[^A-Za-z0-9\s\-/_.]", label_text):
+    # underscores, periods, and parentheses (e.g. "Rt Ut-S/D", "GA 20w3d",
+    # "FL/AC", "OFD(HC)", "CI(BPD/OFD)").
+    if re.search(r"[^A-Za-z0-9\s\-/_.()]", label_text):
         return None
 
     # Reject labels with a lowercase-letter immediately followed by an
@@ -440,10 +483,15 @@ def parse_measurement_line(line):
         return None
 
     # Junk-filter: require unit, OR a clinical separator pattern (letter-/-letter
-    # like "FL/AC" or letter--letter like "Rt Ut-PS").  Rejects garbage like
-    # "WA 2ZUW25G OY./" where the slash is just at the end of OCR noise.
+    # like "FL/AC" or letter--letter like "Rt Ut-PS"), OR a parenthesized
+    # composite like "OFD(HC)", OR a numbered volume axis like "D1"/"D2"/"D3"/"D4".
+    # Rejects garbage like "WA 2ZUW25G OY./" where the slash is just at the end
+    # of OCR noise.
     if unit is None:
-        if not re.search(r"[A-Za-z][\-/][A-Za-z]", label_text):
+        has_separator = bool(re.search(r"[A-Za-z][\-/][A-Za-z]", label_text))
+        has_parens = bool(re.search(r"[A-Za-z]+\([A-Za-z/]+\)", label_text))
+        is_volume_axis = label_text.upper() in {"D1", "D2", "D3", "D4"}
+        if not (has_separator or has_parens or is_volume_axis):
             return None
     return label_text, value_str, unit, index
 
@@ -506,10 +554,24 @@ def ocr_measurement_crop(crop, inverted=False):
 
 
 def _extract_measurements_pass(img, crops, inverted):
-    """Single full pass over the given crops with the chosen OCR mode."""
+    """Single full pass over the given crops with the chosen OCR mode.
+
+    Dedup logic across crops within this pass:
+    - Exact (label, index, value) duplicate → skip
+    - (label, index) slot already locked from a previous crop → skip
+      (different value for same slot in a different crop = OCR misread,
+       trust the first crop)
+    - (label, value) already seen with an *index*, but this entry has no
+      index → skip (the second crop saw the same number but lost the
+      "1"/"2" prefix; the indexed version is more informative).
+      ⚠️ This does NOT skip the *first* unindexed entry for a (label, value)
+      that has not yet been seen with an index.  That preserves legitimate
+      single-line boxes (e.g. SPLEEN with one D measurement).
+    """
     w, h = img.size
     seen_keys = set()
     locked_slots = set()
+    indexed_label_values = set()  # (label, value) pairs that arrived WITH an index
     results = []
 
     for left, top, right, bottom in crops:
@@ -520,14 +582,22 @@ def _extract_measurements_pass(img, crops, inverted):
         new_slots_this_crop = set()
         for entry in crop_entries:
             label_norm = normalize_label(entry["label"])
-            slot = (label_norm, entry.get("index"))
+            idx = entry.get("index")
+            slot = (label_norm, idx)
             key = slot + (entry["value"],)
             if key in seen_keys:
                 continue
             if slot in locked_slots:
                 continue
+            # Cross-crop dedup: if we already have this (label, value) under
+            # an index, and this entry has no index, it's a duplicate from
+            # a wider crop where OCR missed the "1"/"2" prefix.
+            if idx is None and (label_norm, entry["value"]) in indexed_label_values:
+                continue
             seen_keys.add(key)
             new_slots_this_crop.add(slot)
+            if idx is not None:
+                indexed_label_values.add((label_norm, entry["value"]))
             results.append(entry)
         locked_slots |= new_slots_this_crop
 
