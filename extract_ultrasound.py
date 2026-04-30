@@ -440,12 +440,17 @@ def parse_measurement_line(line):
     # point "." as the LETTER "A" when the OCR is on small blurry text. The
     # ".4" glyph (small dot + 4 with crossbar) visually resembles capital "A":
     #   "1 D9A5cm"   ← actually "1 D 9.45cm"  (the ".4" became "A")
-    #   "1 D3A6cm"   ← actually "1 D 3.46cm"  (the ".4" became "A")
-    # Pattern: digit + "A" + digit, with "A" sitting inside what looks like a
-    # number. No legitimate clinical label has this pattern (real labels with
-    # "A" never sit between two digits with no spaces).
-    # Replace "A" between digits with ".4" to recover the original value.
-    line = re.sub(r"(\d)A(\d)", r"\1.4\2", line)
+    #   "1 D3A6cm"   ← actually "1 D 3.46cm"
+    #   "3 D9AOcm"   ← actually "3 D 9.40cm"  (".4" → A, AND "0" → O)
+    # Pattern: digit + "A" + (digit OR letter "O"/"o" misread of digit 0),
+    # with the cluster sitting inside what looks like a number. No
+    # legitimate clinical label has this pattern (real labels with "A"
+    # never sit between two digits with no spaces).
+    # Replace "A" with ".4", and any trailing O/o with "0".
+    def _fix_a_decimal(m: "re.Match") -> str:
+        trailing = "0" if m.group(2) in "Oo" else m.group(2)
+        return f"{m.group(1)}.4{trailing}"
+    line = re.sub(r"(\d)A([\dOo])", _fix_a_decimal, line)
 
     # Find a number (optionally negative/decimal) followed optionally by a unit,
     # at or near the END of the line.  Allow a stray "/" between number and unit
