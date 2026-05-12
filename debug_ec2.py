@@ -31,6 +31,16 @@ PASSWORD = "orthanc"
 # EDIT THIS LIST: paste instance IDs from frontend Network tab payloads
 # ──────────────────────────────────────────────────────────────────────
 INSTANCE_IDS = [
+   "7a278fbf-65f9757d-ab89be56-3d1443db-3ad39bf7",
+"82445c52-0f218ebc-3f7a0204-d8a4ff3f-6157069f",
+"7d4a45f5-a82fe8e2-34932b0f-41965e5b-46181f6a",
+"0f39dc90-3d2477de-f3d7911a-01b034ac-82aae2a2",
+"8af074dc-1cba8b00-88f5db05-b17b8fdb-b941cb74",
+"b781da9f-bdb0fb01-d32ad71b-88b5bfe0-a0e51663",
+"bd34c42b-2c77bbce-eb01466e-8524d045-d05be547",
+"c13262c0-60254868-bb3a1288-ad94d16f-3c70478b",
+
+
     # "1234abcd-5678efgh-...",
     # "another-instance-id-here",
 ]
